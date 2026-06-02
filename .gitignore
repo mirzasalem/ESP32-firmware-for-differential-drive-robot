@@ -1,0 +1,8 @@
+# Arduino IDE build artifacts (if build folder enabled)
+firmware/build/
+*.elf
+*.bin
+
+# OS
+.DS_Store
+*~
