@@ -1,4 +1,4 @@
-# ESP32-firmware-for-differential-drive-robot
+# ESP32 firmware for differential drive robot
 
 ESP32 firmware for **[Buddy](https://github.com/mirzasalem/buddy-ros2)** — a differential-drive mobile robot **designed and built by [Mirza Salem](https://github.com/mirzasalem/)**. This sketch drives L298N motors and quadrature encoders over a serial bridge for ROS 2 (`diffdrive_arduino` / `ros2_control`).
 
