@@ -6,6 +6,10 @@
 # Robot on floor (4 kg load) or lifted for spin-only checks.
 # Pass: wheels start slowly and build up over ~1 s (PWM is no longer floored at 130);
 #       a wheel held by hand is pushed progressively harder; clean stop on m 0 0.
+#       On m 5 5 both encoder deltas must be same sign (LEFT_ENCODER_INVERT=1 on Buddy).
+#       Default PID: u 100:40:150:50 (Ki raised for turn breakaway under body weight).
+#       Also reports the MPU9250 if the firmware was built with USE_IMU.
+#       With ROS: Nav2 goals complete when AMCL pose matches map (see buddy docs/NAVIGATION.md).
 # Flash firmware first: ~/esp/esp2ros2/firmware/ROSArduinoBridge/
 
 set -euo pipefail
@@ -98,11 +102,29 @@ send_cmd "b"
 echo ""
 echo "=== PID gains (match ros2_control.xacro: P:D:I:Ko) ==="
 echo "I term is the ramp — raise it to break away sooner, lower it for a gentler start."
-send_cmd "u 100:40:100:50"
+send_cmd "u 100:40:150:50"
 
 echo ""
 echo "=== Reset encoders ==="
 send_cmd "r"
+
+# Optional MPU9250 (USE_IMU in ROSArduinoBridge.ino). "g" replies
+# "gx gy gz ax ay az imu_ok" as gyro mrad/s, accel mm/s^2, chip frame.
+echo ""
+echo "=== IMU check (g) — keep the robot still ==="
+imu_reply=$(send_cmd "g")
+echo "${imu_reply:-<no reply>}"
+imu_ok=$(as_int "$(echo "$imu_reply" | awk '{print $7}')")
+if [[ "$imu_ok" == "1" ]]; then
+  echo "IMU present. Gyro (mrad/s) should be within a few of 0 while still;"
+  echo "az should be near 9800 (gravity) with the board flat and upright."
+  send_cmd "i" >/dev/null   # re-estimate gyro bias now that it is warm
+  echo "Gyro bias re-estimated (i)."
+elif [[ -z "$imu_reply" || "$imu_reply" == Invalid* ]]; then
+  echo "No IMU support in this firmware (expected if USE_IMU is commented out)."
+else
+  echo "IMU not responding on I2C — check SDA 21 / SCL 22 / 3.3 V (docs/WIRING.md)."
+fi
 
 run_m() {
   local name="$1"

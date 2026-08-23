@@ -24,12 +24,12 @@ SetPointInfo leftPID, rightPID;
 /* PID Parameters — sent from ROS via "u Kp:Kd:Ki:Ko" on activate.
  *
  * Ki is what ramps PWM: a shortfall of 1 tick/frame adds Ki/Ko PWM every 50 Hz
- * frame, so PWM climbs ~100/s at Ki=100 Ko=50 and keeps climbing while stalled.
- * Raise Ki to push through load sooner, lower it for a gentler start.
+ * frame, so PWM climbs ~150/s at Ki=150 Ko=50 and keeps climbing while stalled.
+ * Raise Ki to push through load sooner (turns under body weight), lower for gentler start.
  */
 int Kp = 100;
 int Kd = 40;
-int Ki = 100;
+int Ki = 150;
 int Ko = 50;
 
 /* Coast-down step per frame while the closed loop is idle (m 0 0 or auto-stop). */
@@ -115,6 +115,9 @@ void doPID(SetPointInfo * p) {
     p->ITerm = -i_limit;
   }
 
+  /* If encoder sign is wrong for this wheel, integral windup saturates PWM and
+   * that side spins away on every turn. Clamp alone cannot fix it — fix wiring
+   * or BUDDY_LEFT_ENCODER_INVERT so input and target share a sign when moving. */
   const long out =
     ((long)Kp * perror - (long)Kd * (input - p->PrevInput) + p->ITerm) / Ko;
 

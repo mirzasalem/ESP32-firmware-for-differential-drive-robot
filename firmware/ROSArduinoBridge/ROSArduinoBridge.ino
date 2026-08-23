@@ -81,6 +81,11 @@
 //#define USE_SERVOS  // Enable use of PWM servos as defined in servos.h
 #undef USE_SERVOS     // Disable use of PWM servos
 
+/* MPU9250 gyro + accelerometer on I2C (GPIO 21/22). Comment out if no IMU is
+ * fitted — the sketch then behaves exactly as before and "f" reports imu_ok 0.
+ * Magnetometer is not used; see imu_driver.h. */
+#define USE_IMU
+
 /* Serial port baud rate */
 #define BAUDRATE     115200
 
@@ -98,6 +103,13 @@
 
 /* Sensor functions */
 #include "sensors.h"
+
+#ifdef USE_IMU
+  #include "imu_driver.h"
+
+  /* Track the next time we sample the IMU (independent of the PID rate). */
+  unsigned long nextIMU = IMU_SAMPLE_INTERVAL;
+#endif
 
 /* Include servo support if required */
 #ifdef USE_SERVOS
@@ -197,6 +209,22 @@ void runCommand() {
   case PING:
     Serial.println(Ping(arg1));
     break;
+#ifdef USE_IMU
+  case READ_IMU:
+    /* "gx gy gz ax ay az ok" — gyro mrad/s, accel mm/s^2, chip frame. */
+    imuPrintReading();
+    Serial.println();
+    break;
+  case IMU_CALIBRATE:
+    /* Blocks ~0.5 s and needs the robot stationary, so stop the motors first. */
+#ifdef USE_BASE
+    setMotorSpeeds(0, 0);
+    resetPID();
+    moving = 0;
+#endif
+    Serial.println(imuCalibrateGyroBias() ? "OK" : "IMU FAIL");
+    break;
+#endif
 #ifdef USE_SERVOS
   case SERVO_WRITE:
     servos[arg1].setTargetPosition(arg2);
@@ -213,6 +241,21 @@ void runCommand() {
     Serial.print(readEncoderRosLeft());
     Serial.print(" ");
     Serial.println(readEncoderRosRight());
+    break;
+  case READ_STATE:
+    /* "left right gx gy gz ax ay az imu_ok" — everything the host needs per
+     * cycle in a single round trip, because a USB round trip costs more than a
+     * control frame and polling "e" and "g" separately doubles that cost. */
+    Serial.print(readEncoderRosLeft());
+    Serial.print(" ");
+    Serial.print(readEncoderRosRight());
+    Serial.print(" ");
+#ifdef USE_IMU
+    imuPrintReading();
+#else
+    Serial.print("0 0 0 0 0 0 0");
+#endif
+    Serial.println();
     break;
    case RESET_ENCODERS:
     resetEncoders();
@@ -304,6 +347,12 @@ void setup() {
   resetPID();
 #endif
 
+#ifdef USE_IMU
+  /* Bias is estimated here, so the robot must be still at power-on. Send "i"
+   * later to re-estimate if it was moving or bumped during boot. */
+  imuInit();
+#endif
+
 /* Attach servos if used */
   #ifdef USE_SERVOS
     int i;
@@ -361,6 +410,17 @@ void loop() {
     }
   }
   
+#ifdef USE_IMU
+  /* Sampled faster than the host polls; imuReadAveraged() returns the mean of
+   * the samples taken since the last read. */
+  if (millis() > nextIMU) {
+    imuUpdate();
+    /* Absolute reschedule, not "+=": a blocking calibration would otherwise
+     * leave the schedule behind and burst-read to catch up. */
+    nextIMU = millis() + IMU_SAMPLE_INTERVAL;
+  }
+#endif
+
 // If we are using base control, run a PID calculation at the appropriate intervals
 #ifdef USE_BASE
   if (millis() > nextPID) {

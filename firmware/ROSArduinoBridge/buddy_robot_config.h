@@ -23,8 +23,11 @@
 #define BUDDY_L298_ENCODER_CROSS 0
 #define BUDDY_L298_MOTOR_CROSS 1
 
-/* Negate raw LEFT encoder counts in readEncoder(LEFT). Default 0 with ENCODER_CROSS=0.
- * Set 1 only if /odom twist.linear.x is wrong sign while driving forward (teleop i). */
-#define BUDDY_LEFT_ENCODER_INVERT 0
+/* Negate raw LEFT encoder counts in readEncoder(LEFT).
+ * Must be 1 on Buddy: bench m 5 5 shows left ticks go negative while the wheel
+ * drives forward. With INVERT 0 the velocity PID sees target=+5, input=-N →
+ * perror explodes, ITerm winds up, and the left wheel spins away on turns.
+ * After this is 1, set negate_left_encoder_odom=false on the Pi (no double flip). */
+#define BUDDY_LEFT_ENCODER_INVERT 1
 
 #endif

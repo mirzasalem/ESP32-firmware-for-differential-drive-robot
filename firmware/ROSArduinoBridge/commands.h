@@ -10,6 +10,10 @@
 #define PIN_MODE       'c'
 #define DIGITAL_READ   'd'
 #define READ_ENCODERS  'e'
+/* Encoders and IMU in one reply — one serial round trip instead of "e" + "g". */
+#define READ_STATE     'f'
+#define READ_IMU       'g'
+#define IMU_CALIBRATE  'i'
 #define MOTOR_SPEEDS   'm'
 #define MOTOR_RAW_PWM  'o'
 #define PING           'p'

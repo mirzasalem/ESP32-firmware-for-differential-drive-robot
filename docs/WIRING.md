@@ -2,6 +2,8 @@
 
 Default pin map: `firmware/ROSArduinoBridge/motor_driver.h`, `encoder_driver.h`.
 
+**Buddy verified wiring profile:** `ENCODER_CROSS 0`, `MOTOR_CROSS 1`, `BUDDY_LEFT_ENCODER_INVERT 1`, LEFT enc **26/27**, RIGHT **16/17**. Pi keeps `swap_motor_pwm: false` and `negate_left_encoder_odom: false`.
+
 ## Power
 
 ```
@@ -83,6 +85,26 @@ Response: `OK <L> <R>` echoes the values received.
 
 If **`o 130 130` works** but one side is weak, try PWM **230** (buddy `open_loop_max_pwm` on the Pi).
 
+### Bench test (closed-loop — buddy default)
+
+After open-loop wiring checks, test the **velocity PID** (flash firmware first):
+
+```bash
+~/esp/esp2ros2/scripts/test_closed_loop.sh /dev/ttyACM0 2
+```
+
+Serial `m <L> <R>` sets **encoder ticks per 50 Hz frame**. The firmware sends **no reply** on `m`.
+
+| Command | Meaning |
+|---------|---------|
+| `m 5 5` | Both wheels forward — expect ~250 ticks/s per wheel at steady state |
+| `m 4 -4` | In-place spin |
+| `m 0 0` | Stop + reset PID integral |
+
+Pass: wheels **ease in** (PWM starts near zero, not a snap to 130); blocked wheel pushes harder over time; clean stop on `m 0 0`.
+
+Tune I term on bench: `u 100:40:200:50` (more breakaway) or lower I for gentler start. Buddy Pi sends **`u 100:40:150:50`** on activate via `ros2_control.xacro` (verified for left/right turns under body weight).
+
 ### Diag: last spin step fails (`o -130 130`)
 
 After `test_motors_diag.sh`, compare these (with **MOTOR_CROSS=1**, **ENCODER_CROSS=0**):
@@ -124,18 +146,75 @@ Configured in `encoder_driver.h` / `encoder_driver.ino`:
 
 | Firmware label | GPIO A | GPIO B | Physical side | Notes |
 |----------------|--------|--------|---------------|--------|
-| **LEFT** | **26** | **27** | Left wheel | `BUDDY_LEFT_ENCODER_INVERT 0` (raw; set 1 to negate) |
+| **LEFT** | **26** | **27** | Left wheel | `BUDDY_LEFT_ENCODER_INVERT 1` (required — raw counts decrease on forward) |
 | **RIGHT** | **16** | **17** | Right wheel | Count used as-is |
 
 - Use **3.3 V** logic encoders; firmware enables **internal pull-ups** (`ESP32Encoder`).
 - If you change encoder pins, re-upload and recalibrate buddy `encoder_counts_per_rev` in `drive_train.xacro`.
+
+## MPU9250 IMU → ESP32 I2C (optional)
+
+Enabled by `#define USE_IMU` in `ROSArduinoBridge.ino`. Pins in `imu_driver.h`.
+
+| MPU9250 pin | ESP32 | Notes |
+|-------------|-------|-------|
+| VCC | **3.3 V** | Most modules have a regulator and tolerate 5 V, but 3.3 V avoids any doubt about the SDA/SCL levels |
+| GND | GND | Shares the ESP32 / L298 / battery ground |
+| SDA | **21** | Free on buddy — motors use 18/19/32/33, encoders 26/27/16/17 |
+| SCL | **22** | |
+| AD0 | GND or unconnected | Address `0x68`; tie high for `0x69` (both are probed) |
+| NCS, FSYNC, INT | leave unconnected | Interrupts are not used; the firmware polls at 100 Hz |
+
+Only four wires are needed. The magnetometer is deliberately not read, so no compass calibration is involved.
+
+### Mounting
+
+Position is nearly irrelevant — a gyro measures the same angular rate anywhere on a rigid body, so a few centimetres off-centre changes nothing about yaw. Two things do matter:
+
+1. **Rigid mounting.** Screws or double-sided foam tape onto the chassis plate. A board that can rock adds vibration straight into the gyro. Keep it off the motors and the L298 heatsink.
+2. **Known orientation.** Buddy mounts it **flat, chip +X pointing robot-forward**, which is why `chassis_imu_roll/pitch/yaw` are all `0` in `buddy/description/chassis.xacro`. Rotate the numbers there, never the signs in firmware.
+
+Then measure the XYZ offset from `base_link` (wheel axle centre, floor level) into `chassis_imu_offset_*` in the same file.
+
+### Bench test (IMU)
+
+```bash
+~/esp/esp2ros2/scripts/test_closed_loop.sh /dev/ttyACM0 2   # includes an IMU check
+```
+
+Or directly, with the robot still:
+
+```
+g\r  ->  1 -2 0 -35 51 9803 1
+```
+
+Pass: the last field is **`1`**, the three gyro values sit within a few mrad/s of zero, and the third accel value is near **9800** (gravity in mm/s², board flat and upright). Rotate the robot by hand counter-clockwise and `gz` should go clearly positive.
+
+If the last field is `0`, the ESP found nothing on the bus: check the four wires, that VCC is really 3.3 V, and that nothing else claims GPIO 21/22.
+
+### Run on Pi (after bench pass)
+
+Once **`g`** ends with **`1`**, launch buddy with IMU fusion — the Pi will poll **`f`** automatically:
+
+```bash
+source ~/ros2_ws/install/setup.bash
+ros2 launch buddy robot_navigation.launch.py \
+  map:=/home/mirza/ros2_ws/src/buddy/maps/my_map.yaml \
+  use_imu:=true
+```
+
+Prerequisites on Pi: `ros-jazzy-robot-localization`, `ros-jazzy-imu-sensor-broadcaster`, and `colcon build --packages-select diffdrive_arduino buddy`.
+
+Verify: `ros2 topic hz /imu_sensor_broadcaster/imu` (~10 Hz). Teleop **`i`**: robot and RViz move forward together.
+
+Full guide: [../README.md#mpu9250-imu-optional](../README.md#mpu9250-imu-optional).
 
 ## USB on robot
 
 | Device | Typical port |
 |--------|----------------|
 | RPLIDAR | `/dev/ttyUSB0` |
-| ESP32 | `/dev/ttyUSB1` |
+| ESP32 | `/dev/ttyACM0`, `/dev/ttyACM1`, or stable by-id |
 
 Buddy: `buddy/scripts/setup_usb_serial.sh` (udev) and `ros2_control.xacro` → `device`.
 
@@ -155,7 +234,10 @@ Buddy: `buddy/scripts/setup_usb_serial.sh` (udev) and `ros2_control.xacro` → `
                            │ GPIO 18,19,32,33
                     ┌──────▼──────┐
    Enc L: 26,27 ──►│   ESP32     │◄── USB ──► Pi (buddy / diffdrive_arduino)
-   Enc R: 16,17 ──►└─────────────┘
+   Enc R: 16,17 ──►│             │
+   MPU9250 ────────►│ SDA 21      │   I2C 0x68, 3.3 V (optional, USE_IMU)
+        (4 wires)  │ SCL 22      │
+                    └─────────────┘
         ENCODER_CROSS=0: left joint reads left encoder
         MOTOR_CROSS=1:   left joint PWM → OUT3/4 (crossed)
 ```
