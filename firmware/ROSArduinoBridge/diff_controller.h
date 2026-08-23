@@ -1,7 +1,11 @@
 /* Functions and type-defs for PID control.
  *
  * Taken mostly from Mike Ferguson's ArbotiX code.
- * Buddy: feedforward PWM + small P correction (not cumulative output).
+ * Buddy: velocity PID ported from the joey_v1 I2C firmware. PWM is not floored at a
+ * breakaway value — it starts near zero and the integral term raises it while the
+ * wheel lags its target, so a wheel held back by load is pushed progressively
+ * harder instead of being kicked. Acceleration shaping belongs to
+ * diff_drive_controller on the Pi; this loop only tracks the commanded speed.
  */
 
 /* PID setpoint info For a Motor */
@@ -10,27 +14,26 @@ typedef struct {
   long Encoder;                  // encoder count
   long PrevEnc;                  // last encoder count
   int PrevInput;                 // last input (encoder delta)
-  int ITerm;                     // integrated term
+  long ITerm;                    // integrated term, scaled by Ko
+  int PrevTargetSign;            // sign of last non-zero target
   long output;                   // last motor setting
 } SetPointInfo;
 
 SetPointInfo leftPID, rightPID;
 
-/* PID Parameters — sent from ROS via "u Kp:Kd:Ki:Ko" on activate */
-int Kp = 8;
-int Kd = 2;
-int Ki = 0;
+/* PID Parameters — sent from ROS via "u Kp:Kd:Ki:Ko" on activate.
+ *
+ * Ki is what ramps PWM: a shortfall of 1 tick/frame adds Ki/Ko PWM every 50 Hz
+ * frame, so PWM climbs ~100/s at Ki=100 Ko=50 and keeps climbing while stalled.
+ * Raise Ki to push through load sooner, lower it for a gentler start.
+ */
+int Kp = 100;
+int Kd = 40;
+int Ki = 100;
 int Ko = 50;
 
-/* Max PWM change per PID frame (~30 Hz). */
-const int PWM_SLEW_PER_FRAME = 15;
-
-/* Ignore ±1 tick/frame error when target is small (encoder noise). */
-const int TICK_ERROR_DEADBAND = 1;
-
-/* Feedforward: PWM at ~15 ticks/frame (typical teleop cruise). */
-const int FF_MAX_TICKS = 15;
-const int FF_MAX_PWM = 170;
+/* Coast-down step per frame while the closed loop is idle (m 0 0 or auto-stop). */
+const int PWM_SLEW_IDLE = 8;
 
 unsigned char moving = 0; // closed-loop PID active (m command)
 unsigned char raw_pwm_active = 0; // open-loop o command — do not override in updatePID
@@ -46,30 +49,16 @@ static int clamp_pwm(long value)
   return (int)value;
 }
 
-static int slew_pwm(int target, int current)
+static int slew_pwm(int target, int current, int max_up, int max_down)
 {
   const int delta = target - current;
-  if (delta > PWM_SLEW_PER_FRAME) {
-    return current + PWM_SLEW_PER_FRAME;
+  if (delta > max_up) {
+    return current + max_up;
   }
-  if (delta < -PWM_SLEW_PER_FRAME) {
-    return current - PWM_SLEW_PER_FRAME;
+  if (delta < -max_down) {
+    return current - max_down;
   }
   return target;
-}
-
-static int feedforward_pwm(double target_ticks)
-{
-  if (target_ticks == 0.0) {
-    return 0;
-  }
-  const int sign = (target_ticks > 0.0) ? 1 : -1;
-  const double mag = fabs(target_ticks);
-  int pwm = (int)lround((mag * FF_MAX_PWM) / FF_MAX_TICKS);
-  if (pwm > 0 && pwm < 40) {
-    pwm = 40; /* L298 minimum useful duty */
-  }
-  return sign * pwm;
 }
 
 /*
@@ -83,6 +72,7 @@ void resetPID(){
    leftPID.output = 0;
    leftPID.PrevInput = 0;
    leftPID.ITerm = 0;
+   leftPID.PrevTargetSign = 0;
 
    rightPID.TargetTicksPerFrame = 0.0;
    rightPID.Encoder = readEncoderRosRight();
@@ -90,35 +80,47 @@ void resetPID(){
    rightPID.output = 0;
    rightPID.PrevInput = 0;
    rightPID.ITerm = 0;
+   rightPID.PrevTargetSign = 0;
 }
 
-/* Velocity PID: feedforward + P/D correction (absolute PWM, not cumulative). */
+/* Velocity PID. PWM comes from P/D trim plus an integral term that accumulates
+ * for as long as the encoder delta stays below the commanded ticks per frame. */
 void doPID(SetPointInfo * p) {
   const int input = p->Encoder - p->PrevEnc;
-  int perror = (int)lround(p->TargetTicksPerFrame) - input;
+  const int target = (int)lround(p->TargetTicksPerFrame);
 
-  if (abs(perror) <= TICK_ERROR_DEADBAND &&
-      fabs(p->TargetTicksPerFrame) <= 3.0) {
-    perror = 0;
+  if (target == 0) {
+    p->PrevEnc = p->Encoder;
+    p->PrevInput = input;
+    p->ITerm = 0;
+    p->PrevTargetSign = 0;
+    p->output = 0;
+    return;
   }
 
-  const int ff = feedforward_pwm(p->TargetTicksPerFrame);
-  int corr = (Kp * perror - Kd * (input - p->PrevInput)) / Ko;
-
-  if (Ki != 0) {
-    p->ITerm += Ki * perror;
-    const int i_limit = MAX_PWM * Ko;
-    if (p->ITerm > i_limit) {
-      p->ITerm = i_limit;
-    } else if (p->ITerm < -i_limit) {
-      p->ITerm = -i_limit;
-    }
-    corr += p->ITerm / Ko;
+  /* A reversal must not inherit push accumulated in the other direction. */
+  const int target_sign = (target > 0) ? 1 : -1;
+  if (p->PrevTargetSign != 0 && p->PrevTargetSign != target_sign) {
+    p->ITerm = 0;
   }
+  p->PrevTargetSign = target_sign;
+
+  const int perror = target - input;
+
+  p->ITerm += (long)Ki * perror;
+  const long i_limit = (long)MAX_PWM * Ko;
+  if (p->ITerm > i_limit) {
+    p->ITerm = i_limit;
+  } else if (p->ITerm < -i_limit) {
+    p->ITerm = -i_limit;
+  }
+
+  const long out =
+    ((long)Kp * perror - (long)Kd * (input - p->PrevInput) + p->ITerm) / Ko;
 
   p->PrevEnc = p->Encoder;
   p->PrevInput = input;
-  p->output = clamp_pwm(ff + corr);
+  p->output = clamp_pwm(out);
 }
 
 static int applied_left_pwm = 0;
@@ -140,12 +142,25 @@ void updatePID() {
   }
 
   if (!moving){
-    if (leftPID.PrevInput != 0 || rightPID.PrevInput != 0) {
-      resetPID();
-    }
-    applied_left_pwm = slew_pwm(0, applied_left_pwm);
-    applied_right_pwm = slew_pwm(0, applied_right_pwm);
-    if (applied_left_pwm != 0 || applied_right_pwm != 0) {
+    /* Track the encoders while idle so the first frame after "m" sees a real
+     * one-frame delta rather than every count accumulated since the last stop. */
+    leftPID.PrevEnc = leftPID.Encoder;
+    rightPID.PrevEnc = rightPID.Encoder;
+    leftPID.PrevInput = 0;
+    rightPID.PrevInput = 0;
+    leftPID.ITerm = 0;
+    rightPID.ITerm = 0;
+    leftPID.PrevTargetSign = 0;
+    rightPID.PrevTargetSign = 0;
+
+    const int prev_left = applied_left_pwm;
+    const int prev_right = applied_right_pwm;
+    applied_left_pwm = slew_pwm(0, applied_left_pwm, PWM_SLEW_IDLE, PWM_SLEW_IDLE);
+    applied_right_pwm = slew_pwm(0, applied_right_pwm, PWM_SLEW_IDLE, PWM_SLEW_IDLE);
+    /* Also write the frame that reaches zero, otherwise the last value the driver
+     * ever saw is the final non-zero step and the bridge stays energized. */
+    if (applied_left_pwm != 0 || applied_right_pwm != 0 ||
+        prev_left != 0 || prev_right != 0) {
       setMotorSpeeds(applied_left_pwm, applied_right_pwm);
     }
     return;
@@ -154,10 +169,8 @@ void updatePID() {
   doPID(&rightPID);
   doPID(&leftPID);
 
-  const int target_left = clamp_pwm(leftPID.output);
-  const int target_right = clamp_pwm(rightPID.output);
-  applied_left_pwm = slew_pwm(target_left, applied_left_pwm);
-  applied_right_pwm = slew_pwm(target_right, applied_right_pwm);
+  applied_left_pwm = clamp_pwm(leftPID.output);
+  applied_right_pwm = clamp_pwm(rightPID.output);
 
   setMotorSpeeds(applied_left_pwm, applied_right_pwm);
 }

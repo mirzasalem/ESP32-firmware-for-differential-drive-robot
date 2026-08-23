@@ -115,8 +115,8 @@
   /* PID parameters and functions */
  #include "diff_controller.h"
 
-  /* Run the PID loop at 30 times per second */
-  #define PID_RATE           30     // Hz
+  /* Run the PID loop at 50 times per second (match buddy ros2_control loop_rate). */
+  #define PID_RATE           50     // Hz
 
   /* Convert the rate into an interval */
   const int PID_INTERVAL = 1000 / PID_RATE;
@@ -231,7 +231,8 @@ void runCommand() {
       leftPID.TargetTicksPerFrame = arg1;
       rightPID.TargetTicksPerFrame = arg2;
     }
-    Serial.println("OK");
+    /* No reply: "m" arrives every control frame and the Pi does not wait for it.
+     * Echoing here fills the USB buffer and stalls the next "e" read. */
     break;
   case MOTOR_RAW_PWM:
     /* Open-loop from ROS — disable closed-loop PID */

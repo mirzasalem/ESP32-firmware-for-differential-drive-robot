@@ -14,8 +14,8 @@ Used by `diffdrive_arduino` on the Pi and for bench testing.
 |-----|--------|-------------|
 | `e` | `e` + CR | Read encoders → `left right` + newline (see [WIRING.md](WIRING.md)) |
 | `r` | `r` + CR | Reset encoders + PID → `OK` |
-| `m` | `m <L> <R>` + CR | Closed-loop: encoder ticks per PID frame (~30 Hz) |
-| `o` | `o <L> <R>` + CR | Open-loop PWM −255…255 per side (buddy caps 130–230 on Pi) |
+| `m` | `m <L> <R>` + CR | Closed-loop: encoder ticks per PID frame (~50 Hz). **No reply** |
+| `o` | `o <L> <R>` + CR | Open-loop PWM −255…255 per side (buddy caps 130–230 on Pi) → `OK <L> <R>` |
 | `u` | `u Kp:Kd:Ki:Ko` + CR | Update PID (order **P:D:I:Ko**) → `OK` |
 | `b` | `b` + CR | Print baud rate |
 
@@ -48,17 +48,36 @@ readEncoderRosRight();  // second number = right_wheel_joint
 
 Response: `OK <L> <R>` (echoes received values).
 
+### `m` sends no reply
+
+`m` arrives on every control frame and the Pi does not wait for an acknowledgement. Echoing `OK` per command filled the USB buffer and stalled the following `e` read, which showed up on the Pi as multi-hundred-millisecond `Read time` warnings, `Encoder read failed`, and Nav2 `Failed to make progress`. Do not add the reply back.
+
+Commands that **do** reply: `c`, `w`, `x`, `r`, `u` → `OK`; `o` → `OK <L> <R>`; `b`, `e`, `a`, `d`, `p` → data; unknown → `Invalid Command`.
+
 ### Auto-stop
 
 If no motor command arrives for **2 seconds** (`AUTO_STOP_INTERVAL`), PWM goes to 0.
 
+The Pi driver only writes `m` when the tick pair changes, so it also resends an unchanged command every 500 ms (`motor_keepalive_ms`) to stay inside this window. Lowering `AUTO_STOP_INTERVAL` below that keep-alive will cut off a steady cruise.
+
 ### PID loop rate
 
-**30 Hz** — `TargetTicksPerFrame` is encoder ticks **per frame**, not per second.
+**50 Hz** — `TargetTicksPerFrame` is encoder ticks **per frame**, not per second.
 
-Approximate: `ticks_per_sec ≈ TargetTicksPerFrame × 30`.
+Approximate: `ticks_per_sec ≈ TargetTicksPerFrame × 50`.
 
-Buddy default: **`use_open_loop_pwm: true`** → ROS sends `o` only. Set `use_open_loop_pwm: false` in `ros2_control.xacro` for closed-loop `m` + ESP PID.
+Buddy default: **`use_open_loop_pwm: false`** → ROS sends `m` + ESP PID. Set `use_open_loop_pwm: true` in `ros2_control.xacro` for open-loop `o` only.
+
+### Velocity PID and the PWM ramp
+
+`diff_controller.h` runs a velocity PID ported from the ROS1 joey_v1 I2C firmware. PWM is **not** floored at a breakaway value:
+
+- Output is `(Kp*err - Kd*d_input + ITerm) / Ko`, clamped to ±`MAX_PWM`.
+- `ITerm` accumulates `Ki * err` each frame and is clamped to ±`MAX_PWM * Ko`.
+- A wheel held back by load keeps accumulating, so PWM climbs until it breaks free or saturates.
+- `ITerm` resets on `m 0 0` and on a direction reversal, so a stop or reversal never inherits accumulated push.
+
+**Ki is the ramp rate.** At `Ko = 50`, a 1 tick/frame shortfall adds `Ki/Ko` PWM per frame, so `Ki = 100` climbs about 100 PWM per second. Tune via `u` (or `pid_i` in the Pi's `ros2_control.xacro`) without reflashing. Acceleration shaping belongs to `diff_drive_controller` on the Pi, not here.
 
 ## Other commands (optional)
 
