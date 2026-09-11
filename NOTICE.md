@@ -1,25 +1,28 @@
-# Notice and license
+# Notice and License
 
-## esp2ros2 firmware
+## Firmware in this repository
 
 The sketch under `firmware/` is derived from **ROSArduinoBridge**:
 
-- Authors: Patrick Goebel, James Nugen (and contributors)
-- Original project: Pi Robot / HBRC, ArbotiX-inspired serial bridge
-- License: **BSD 3-Clause** (see copyright header in `firmware/ROSArduinoBridge/ROSArduinoBridge.ino`)
+- Original authors: Patrick Goebel, James Nugen, and contributors
+- Upstream project: [ros_arduino_bridge](https://github.com/hbrobotics/ros_arduino_bridge) (Pi Robot / HBRC)
+- License: **BSD 3-Clause** (see copyright header in `ROSArduinoBridge.ino`)
 
-Modifications for buddy / esp2ros2:
+### Modifications in this tree
 
-- ESP32 target with `ESP32_ENC_COUNTER` and [ESP32Encoder](https://github.com/madhephaestus/ESP32Encoder) library
-- Default **L298N** pin map in `motor_driver.h`
-- Documented for ROS 2 Jazzy **buddy** package (`diffdrive_arduino`)
+- ESP32 target with `ESP32_ENC_COUNTER` and the [ESP32Encoder](https://github.com/madhephaestus/ESP32Encoder) library
+- L298N pin map and chassis mapping flags
+- MPU9250 IMU driver over raw I2C (`imu_driver.*`)
+- Serial extensions for combined encoder + IMU state (`f`, `g`, `i`)
+- Documentation for ROS 2 Jazzy / `diffdrive_arduino` integration
 
-## ESP32Encoder library (dependency, not vendored)
+## ESP32Encoder (dependency, not vendored)
 
 - Repository: https://github.com/madhephaestus/ESP32Encoder  
-- Install separately via Arduino Library Manager or copy from `~/ros2_ws/ESP32Encoder`  
-- Follow that project’s license when distributing the library
+- Install separately (Arduino Library Manager or local copy)  
+- Follow that project’s license when redistributing the library
 
-## buddy ROS 2 package
+## Host ROS 2 stack
 
-Robot description, Nav2, and launch files live in `~/ros2_ws/src/buddy` (separate package, MIT / see buddy `NOTICE.md`).
+Robot description, navigation, and launch files live in a separate repository:  
+[buddy-ros2](https://github.com/mirzasalem/buddy-ros2).
