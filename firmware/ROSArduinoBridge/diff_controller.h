@@ -21,15 +21,21 @@ typedef struct {
 
 SetPointInfo leftPID, rightPID;
 
-/* PID Parameters — sent from ROS via "u Kp:Kd:Ki:Ko" on activate.
+/* PID Parameters — sent from ROS via "u Kp:Kd:Ki:Ko" on activate. These compile-in
+ * values are only the bench-test fallback before ROS activates; ros2_control.xacro's
+ * pid_p/d/i/o is what actually drives the robot and must be kept in sync here.
  *
- * Ki is what ramps PWM: a shortfall of 1 tick/frame adds Ki/Ko PWM every 50 Hz
- * frame, so PWM climbs ~100/s at Ki=100 Ko=50 and keeps climbing while stalled.
- * Raise Ki to push through load sooner, lower it for a gentler start.
+ * Ki is what ramps PWM: a shortfall of 1 tick/frame adds Ki/Ko PWM every
+ * PID_RATE frame, so PWM climbs ~140/s at Ki=350 Ko=50 and PID_RATE 20.
+ * Raise Ki to push through load sooner (turns under body weight), lower for gentler start.
+ * Raised 150->200 (2026-09-02, unloaded bench) then 200->350 (same day, loaded spin-in-place
+ * bench with the robot's real weight on the wheels — see ros2_control.xacro comment and
+ * docs/DRIVE_TRAIN.md §3.0) to cut the fixed dead time before breakaway; Kd raised alongside
+ * it (40->60->80) to damp the kick once the wheel breaks free.
  */
 int Kp = 100;
-int Kd = 40;
-int Ki = 100;
+int Kd = 80;
+int Ki = 350;
 int Ko = 50;
 
 /* Coast-down step per frame while the closed loop is idle (m 0 0 or auto-stop). */
@@ -115,6 +121,9 @@ void doPID(SetPointInfo * p) {
     p->ITerm = -i_limit;
   }
 
+  /* If encoder sign is wrong for this wheel, integral windup saturates PWM and
+   * that side spins away on every turn. Clamp alone cannot fix it — fix wiring
+   * or BUDDY_LEFT_ENCODER_INVERT so input and target share a sign when moving. */
   const long out =
     ((long)Kp * perror - (long)Kd * (input - p->PrevInput) + p->ITerm) / Ko;
 
@@ -164,6 +173,26 @@ void updatePID() {
       setMotorSpeeds(applied_left_pwm, applied_right_pwm);
     }
     return;
+  }
+
+  /* doPID() only resets a wheel's own ITerm when THAT wheel's target sign flips.
+   * A turn (L and R targets opposite sign) followed immediately by forward/reverse
+   * (L and R same sign) flips only one wheel's sign — the other keeps whatever ITerm
+   * it wound up during the turn and slams that windup into the new move the instant
+   * it starts, felt as an asymmetric push/lurch. Reset both wheels together whenever
+   * either one's target sign flips, so no maneuver starts carrying push from a
+   * different one. */
+  const int left_target_sign = leftPID.TargetTicksPerFrame > 0 ? 1
+    : leftPID.TargetTicksPerFrame < 0 ? -1 : 0;
+  const int right_target_sign = rightPID.TargetTicksPerFrame > 0 ? 1
+    : rightPID.TargetTicksPerFrame < 0 ? -1 : 0;
+  const bool left_flipped = left_target_sign != 0 &&
+    leftPID.PrevTargetSign != 0 && leftPID.PrevTargetSign != left_target_sign;
+  const bool right_flipped = right_target_sign != 0 &&
+    rightPID.PrevTargetSign != 0 && rightPID.PrevTargetSign != right_target_sign;
+  if (left_flipped || right_flipped) {
+    leftPID.ITerm = 0;
+    rightPID.ITerm = 0;
   }
 
   doPID(&rightPID);

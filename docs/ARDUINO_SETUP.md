@@ -1,5 +1,7 @@
 # Arduino IDE setup and upload
 
+Buddy ships with firmware tuned and **verified on the real robot** — upload this tree before first drive, run the closed-loop bench test, then launch buddy navigation.
+
 ## 1. Install Arduino IDE
 
 Use [Arduino IDE 2.x](https://www.arduino.cc/en/software) on Linux, Windows, or macOS.
@@ -50,26 +52,31 @@ In `ROSArduinoBridge.ino` near the top:
 #define L298_MOTOR_DRIVER
 #define ESP32_ENC_COUNTER
 //#define CYTRON_MDD3A
+#define USE_IMU
 ```
 
 Only **one** motor driver define should be active.
+
+`USE_IMU` enables the MPU9250 on I2C (SDA 21 / SCL 22). It needs no extra library — `imu_driver.ino` talks to the registers directly through `Wire`, which also means it works with the MPU6500 boards sold as MPU9250. Comment it out if no IMU is fitted; the sketch then behaves exactly as before and `f` reports `imu_ok 0`.
 
 ### Buddy-specific firmware options (already in this tree)
 
 | File | What to know |
 |------|----------------|
-| `buddy_robot_config.h` | **`BUDDY_L298_ENCODER_CROSS 0`**, **`BUDDY_L298_MOTOR_CROSS 1`** (split cross — see WIRING.md) |
+| `buddy_robot_config.h` | **`BUDDY_L298_ENCODER_CROSS 0`**, **`BUDDY_L298_MOTOR_CROSS 1`**, **`BUDDY_LEFT_ENCODER_INVERT 1`** (required — left encoder sign for PID + `e`) |
 | `motor_driver.ino` | `setMotorSpeeds()` crosses motor PWM when `MOTOR_CROSS=1` |
+| `diff_controller.h` | **Velocity PID** (ROS1 joey_v1 port): PWM from 0, **Ki** ramps under load — no PWM-130 floor |
 | `encoder_driver.h` | LEFT encoder GPIO **26, 27**; RIGHT **16, 17** |
 | `encoder_driver.ino` | `readEncoder(LEFT)` negated; **`readEncoderRosLeft/Right()`** use `ENCODER_CROSS` |
 | `ROSArduinoBridge.ino` | `o` / `e` use ROS joint order |
+| `imu_driver.h` / `.ino` | MPU9250 raw I2C, ±250 °/s, 100 Hz, gyro bias averaged at boot. Magnetometer unused; mount orientation belongs in buddy `imu.xacro` |
 
 Details: [WIRING.md](WIRING.md), [SERIAL_PROTOCOL.md](SERIAL_PROTOCOL.md).
 
 ## 6. Select port and upload
 
 1. Plug ESP32 via USB.
-2. **Tools → Port** → `/dev/ttyUSB1` or `/dev/ttyACM0`.
+2. **Tools → Port** → `/dev/ttyACM0`, `/dev/ttyACM1`, or `/dev/ttyUSB1`.
 3. **Upload** (→).
 4. Wait for **Done uploading**.
 
@@ -89,14 +96,32 @@ On the robot, prefer buddy’s udev script: `buddy/scripts/setup_usb_serial.sh`.
 | Type + Enter | Expected |
 |--------------|----------|
 | `b` | `115200` |
+| `u 100:80:350:50` | `OK` — buddy default PID (P:D:I:Ko), raised 2026-09-02, floor-verified |
+| `r` | `OK` — reset encoders + PID |
 | `e` | two integers (left count, right count) |
-| `o 100 100` | both wheels move (same direction) |
+| `m 5 5` | wheels move — **no reply** (fire-and-forget) |
+| `m 0 0` | stop |
+| `o 100 100` | both wheels move → `OK 100 100` |
 | `o 100 -100` | spin in place (if wiring matches buddy) |
+| `g` | `gx gy gz ax ay az 1` — gyro near 0 while still, `az` near 9800 (mm/s²). `…0` means no IMU on the bus; `Invalid Command` means `USE_IMU` is off |
+| `i` | `OK` — re-estimate gyro bias (keep the robot still) |
 | `o 0 0` | stop |
 
-Better: `~/esp/esp2ros2/scripts/test_motors_diag.sh /dev/ttyUSB1`
+**Closed-loop bench (recommended after upload):**
 
-Close Serial Monitor before running buddy.
+```bash
+~/esp/esp2ros2/scripts/test_closed_loop.sh /dev/ttyACM0 3
+```
+
+**Open-loop wiring check:**
+
+```bash
+~/esp/esp2ros2/scripts/test_motors_diag.sh /dev/ttyACM0
+```
+
+Close Serial Monitor before running buddy or the bench scripts.
+
+**Navigation check (optional):** after buddy build, `ros2 launch buddy robot_navigation.launch.py map:=...`, wait ~20 s, send Nav2 goal. Hardware log should show non-zero `closed-loop m` during turns; goal should succeed with correct AMCL pose.
 
 ## 8. Run buddy
 
@@ -114,8 +139,8 @@ Teleop: `i` forward, `,` back, `j` / `l` turn. See buddy [KEYBOARD_TELEOP.md](ht
 
 | You changed | Action |
 |-------------|--------|
-| `motor_driver.*`, `encoder_driver.*`, `ROSArduinoBridge.ino` | **Upload** again |
-| Buddy URDF / `controller.yaml` / `ros2_control.xacro` only | `colcon build` on Pi — no ESP reflash |
+| `motor_driver.*`, `encoder_driver.*`, `diff_controller.h`, `ROSArduinoBridge.ino` | **Upload** again |
+| Buddy URDF / `controller.yaml` / `ros2_control.xacro` only | `colcon build --packages-select diffdrive_arduino buddy` on Pi — no ESP reflash for gain-only xacro changes |
 | Serial protocol or cross flags in `buddy_robot_config.h` | Re-flash + note in buddy `DRIVE_TRAIN.md` |
 
 ## PlatformIO (optional)

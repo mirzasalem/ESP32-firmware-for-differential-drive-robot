@@ -2,7 +2,12 @@
 # Bench-test ESP32 motors without ROS.
 # Usage: ./test_motors.sh [port] [left_pwm] [right_pwm] [seconds]
 # Example: ./test_motors.sh /dev/ttyUSB1 230 230 3
-# Buddy ROS caps PWM 130–230; below 130 may not move on this chassis.
+# Buddy ROS caps open-loop PWM to 130-230 (open_loop_min/max_pwm in ros2_control.xacro),
+# but that floor is conservative: a 2026-09-02 loaded bench (pwm_sweep.py, spin-in-place,
+# robot's real weight on the wheels) measured actual breakaway around PWM 75-80, so
+# values below 130 can move — this script's floor of 130 is just the configured open-loop
+# range, not the true breakaway threshold. Closed-loop `m` is the default path; this
+# script is open-loop diagnostics only.
 #
 # Do NOT use bare "printf ... > /dev/ttyUSB1" — each open resets ESP32 USB
 # and the command is often lost. This script keeps the port open.
